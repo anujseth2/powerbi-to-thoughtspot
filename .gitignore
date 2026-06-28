@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+tml_out/
+tests/fixtures/
+*.tml
+!references/**/*.tml
+model.json
+mapping.json
+migration_report.md
+.DS_Store
