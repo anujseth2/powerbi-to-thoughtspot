@@ -222,24 +222,30 @@ def parse_semantic_model(sm_dir: str, warnings: list):
     return tables, relationships
 
 
+# Power BI QueryAggregateFunction codes -> ThoughtSpot aggregation word.
+_AGG_FUNC = {0: "sum", 1: "average", 2: "min", 3: "max", 4: "count", 5: "count"}
+
+
 def _field_ref(field):
-    """A PBIR projection 'field' dict -> (column/measure name, source entity, kind).
+    """A PBIR projection 'field' dict -> (name, source entity, kind, agg).
 
     Reads the real Property out of Column / Measure / Aggregation(of a Column),
     rather than trusting queryRef -- which is often a generic 'select'/'select1'
-    placeholder (drops the column) or 'Sum(Table.Col)' (mangles it)."""
+    placeholder (drops the column) or 'Sum(Table.Col)' (mangles it). For an inline
+    Aggregation, also returns the aggregation word (e.g. 'sum' for Sum(BadHires))."""
     if not isinstance(field, dict):
-        return None, None, None
+        return None, None, None, None
     for kind in ("Column", "Measure"):
         if kind in field:
             inner = field[kind]
             ent = (((inner.get("Expression") or {}).get("SourceRef") or {}).get("Entity"))
-            return inner.get("Property"), ent, kind.lower()
+            return inner.get("Property"), ent, kind.lower(), None
     if "Aggregation" in field:                      # inline aggregation of a column, e.g. Sum(BadHires)
-        col = (field["Aggregation"].get("Expression") or {}).get("Column") or {}
+        agg = field["Aggregation"]
+        col = (agg.get("Expression") or {}).get("Column") or {}
         ent = ((col.get("Expression") or {}).get("SourceRef") or {}).get("Entity")
-        return col.get("Property"), ent, "aggregation"
-    return _deep_field_name(field), None, None
+        return col.get("Property"), ent, "aggregation", _AGG_FUNC.get(agg.get("Function"), "sum")
+    return _deep_field_name(field), None, None, None
 
 
 def _projection_fields(query_state):
@@ -251,9 +257,9 @@ def _projection_fields(query_state):
         if not isinstance(proj, dict):
             continue
         for item in proj.get("projections", []):
-            name, entity, kind = _field_ref(item.get("field", item))
+            name, entity, kind, agg = _field_ref(item.get("field", item))
             name = name or item.get("queryRef")
-            fields.append({"role": role, "field": name, "entity": entity, "kind": kind})
+            fields.append({"role": role, "field": name, "entity": entity, "kind": kind, "agg": agg})
     return fields
 
 

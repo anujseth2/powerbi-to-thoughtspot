@@ -861,10 +861,15 @@ def _leaf(field_name):
 
 
 def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names,
-                                 measure_names, overrides, warnings):
-    """Return (answers, liveboards, visual_rows, page_rows)."""
+                                 measure_names, overrides, warnings, agg_measures=None):
+    """Return (answers, liveboards, visual_rows, page_rows).
+
+    agg_measures maps (agg_word, column_name_lower) -> a model measure name, so a
+    Power BI inline aggregation (e.g. Sum(BadHires)) binds to the equivalent measure
+    ("Sum of BadHires") instead of the bare calc column (which can't be summed)."""
     ov_visuals = {(v.get("page"), v.get("visual")): v
                   for v in (overrides.get("visuals") or [])}
+    agg_measures = agg_measures or {}
     answers, liveboards, visual_rows, page_rows = [], [], [], []
     norm = {n.lower(): n for n in column_names}
 
@@ -885,6 +890,14 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
             # Resolve fields to model columns by leaf-name match.
             cols, missing = [], []
             for f in vis.get("fields", []):
+                if f.get("kind") == "aggregation":   # inline Sum(col) -> the equivalent measure
+                    mname = agg_measures.get(((f.get("agg") or "sum"), (f.get("field") or "").lower()))
+                    if mname and mname.lower() in norm:
+                        if norm[mname.lower()] not in cols:
+                            cols.append(norm[mname.lower()])
+                    else:
+                        missing.append(f"{f.get('agg') or 'agg'}({f.get('field')})")
+                    continue
                 leaf = _leaf(f.get("field"))
                 if not leaf:
                     continue
@@ -1094,9 +1107,21 @@ def main():
     col_names = [c["name"] for c in model_tml["model"]["columns"]]
     measure_names = {c["name"] for c in model_tml["model"]["columns"]
                      if c.get("properties", {}).get("column_type") == "MEASURE"}
+    # Map simple aggregation measures (SUM([col])/AVERAGE([col])/...) so a Power BI
+    # inline aggregation Sum(col) binds to the equivalent named measure.
+    _simple_agg = re.compile(r"(?i)^\s*(SUM|AVERAGE|AVG|MIN|MAX|COUNT|COUNTA|DISTINCTCOUNT)\s*\(\s*(.+?)\s*\)\s*$")
+    agg_measures = {}
+    for t in model_json.get("tables", []):
+        for me in t.get("measures", []):
+            mm = _simple_agg.match(me.get("expression", ""))
+            if mm:
+                aggw = mm.group(1).lower().replace("avg", "average")
+                col = re.sub(r".*[\[.]", "", mm.group(2)).strip(" []")
+                if col:
+                    agg_measures[(aggw, col.lower())] = me["name"]
     answers, liveboards, visual_rows, page_rows = build_answers_and_liveboards(
         model_json, model_name, args.model_fqn, col_names, measure_names,
-        overrides, warnings)
+        overrides, warnings, agg_measures)
     for a in answers:
         written.append(_write(args.out, f"{_slug(a['answer']['name'])}.answer.tml", a))
     for lb in liveboards:
