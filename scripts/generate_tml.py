@@ -939,6 +939,20 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
 
     for page in model_json.get("pages", []):
         page_name = page.get("name") or page.get("id")
+        # A Power BI "Tooltip" page is a hover overlay bound to visuals on other pages,
+        # not a navigable page -- it has no ThoughtSpot equivalent and must NOT become a
+        # tab. Flag it (and its visuals) rather than presenting a hidden popup as a tab.
+        if page.get("tooltip"):
+            page_rows.append({"name": page_name, "liveboard": "(none)",
+                              "status": "NEEDS REVIEW",
+                              "note": "PBI custom tooltip page (hover overlay on other pages' "
+                                      "visuals); no ThoughtSpot equivalent; not migrated as a tab"})
+            for vi, vis in enumerate(page.get("visuals", [])):
+                visual_rows.append({"page": page_name,
+                                    "visual": f"{page_name} - {vis.get('type', 'visual')} {vi + 1}",
+                                    "ts_chart": "(tooltip)", "status": "NEEDS REVIEW",
+                                    "note": "on a PBI tooltip page; renders on hover, not as a tab"})
+            continue
         page_answers = []
         for vi, vis in enumerate(page.get("visuals", [])):
             title = f"{page_name} - {vis.get('type', 'visual')} {vi + 1}"
