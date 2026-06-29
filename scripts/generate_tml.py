@@ -8,7 +8,7 @@ TML for the whole dependency graph:
     Table TML   (one per Power BI table: columns, types, db binding)
     Model TML   (one: joins from relationships, formulas from DAX measures, columns)
     Answer TML  (one per visual: chart type + columns)
-    Liveboard   (one per report page: the page's answers as visualizations)
+    Liveboard   (ONE per report: each report page becomes a tab in layout.tabs[])
 
 It also writes a `mapping.json` in the status shape migration_report.py consumes,
 so the three scripts chain:
@@ -323,22 +323,26 @@ def _calc_approx(args):
     return None      # AVERAGE/MIN/MAX/measure-ref: not a safe 1-line approximation
 
 
-def _inline_refs(dax, mdax, seen=None, depth=0):
-    """Recursively substitute [Measure]/[CalcColumn] references with their own DAX so
-    each formula is self-contained. ThoughtSpot can't sum() a formula column and a
-    reference to a NEEDS-REVIEW measure would dangle, so inlining is what lets
-    SUM([isNewHire]) and CALCULATE([EmpCount], ...) translate (or be flagged honestly
-    once their real definition is exposed). Cycle-safe via `seen`."""
-    if depth > 15 or not mdax:
-        return dax
-    seen = seen or set()
+def _refs_to_ids(dax, names):
+    """Rewrite a DAX reference to another measure/calc-column as a ThoughtSpot
+    formula-ID reference: [formula_<name>].
+
+    ThoughtSpot resolves a sibling formula by its column id (formula_<name>), NOT by
+    its display name -- a bare [Display Name] in a formula expression does not resolve
+    (and a leading reserved word like 'Sum' is even mis-parsed as the agg keyword).
+    Using the id keeps the measure dependency graph intact instead of inlining every
+    definition: DIVIDE([Seps],[Actives]) -> [formula_Seps] / [formula_Actives], and
+    SUM(Employee[isNewHire]) -> sum([formula_isNewHire]). Physical column refs
+    ('Table'[Col] / Table[Col]) are NOT in `names`, so they fall through to _COL_REF
+    which qualifies them to [Table::Col]. Verified on-cluster 2026-06-29.
+
+    A reference to a measure that itself fails to translate would dangle; build_model_tml
+    cascades a NEEDS-REVIEW to dependents (see _cascade_flag) so the report stays honest."""
     out = dax
-    for name, expr in mdax.items():
-        if name in seen or not expr:
-            continue
-        tok = "[" + name + "]"
-        if tok in out:
-            out = out.replace(tok, "(" + _inline_refs(expr, mdax, seen | {name}, depth + 1) + ")")
+    for name in sorted((n for n in names if n), key=len, reverse=True):
+        # optional table qualifier ('T'[name] / T[name]) or a bare [name]
+        pat = re.compile(r"(?:'[^']*'|[A-Za-z_]\w*)?\s*\[" + re.escape(name) + r"\]")
+        out = pat.sub("[formula_" + name + "]", out)
     return out
 
 
@@ -375,10 +379,12 @@ def translate_dax(dax, home_table=None, home_cols=None, date_cols=None, measure_
     if not src:
         return None, "NEEDS REVIEW", "empty measure expression"
 
-    # Inline references to other measures/calc-columns first, so each formula is
-    # self-contained (TS can't sum a formula column or dangle a NEEDS-REVIEW ref).
+    # Rewrite references to other measures/calc-columns as TS formula-id references
+    # ([formula_<name>]) instead of inlining their DAX. TS resolves siblings by id and
+    # this keeps the measure dependency graph intact. (A CALCULATE that wraps a measure
+    # ref still flags, because _calc_approx only approximates a direct SUM/COUNT.)
     if measure_dax:
-        src = _inline_refs(src, measure_dax)
+        src = _refs_to_ids(src, set(measure_dax))
 
     note_bits = []
     # Approximate the common CALCULATE(<agg>, FILTER(table, cond)) pattern as a
@@ -564,9 +570,11 @@ def _round_repl(args):
 # --------------------------------------------------------------------------- #
 
 _CHART_MAP = {
-    "columnchart": "COLUMN", "clusteredcolumnchart": "COLUMN",
+    # Power BI's "columnChart"/"barChart" ARE the stacked variants; the clustered
+    # forms have their own visualType names. (Got this backwards originally.)
+    "columnchart": "STACKED_COLUMN", "clusteredcolumnchart": "COLUMN",
     "stackedcolumnchart": "STACKED_COLUMN", "hundredpercentstackedcolumnchart": "STACKED_COLUMN",
-    "barchart": "BAR", "clusteredbarchart": "BAR",
+    "barchart": "STACKED_BAR", "clusteredbarchart": "BAR",
     "stackedbarchart": "STACKED_BAR", "hundredpercentstackedbarchart": "STACKED_BAR",
     "linechart": "LINE", "areachart": "AREA", "stackedareachart": "AREA",
     "lineclusteredcolumncombochart": "LINE_COLUMN", "linestackedcolumncombochart": "LINE_STACKED_COLUMN",
@@ -580,6 +588,34 @@ _NON_VISUAL = {"slicer", "advancedslicervisual", "textbox", "actionbutton", "ima
 # Minimum measures a chart type needs to render; used to FLAG (not downgrade) a viz
 # whose measures didn't all translate. Types not listed need 1 (tables need 0).
 _CHART_NEEDS = {"LINE_COLUMN": 2, "LINE_STACKED_COLUMN": 2, "SCATTER": 2, "ADVANCED_BUBBLE": 2}
+
+
+_MONTH_PARTS = {"month", "month name", "monthname", "month of year"}
+
+
+def _date_bucket_map(model_json):
+    """Map a date-table month-name column -> (search_token, bucketed_label).
+
+    A Power BI date hierarchy puts a "Month" text column on the axis but sorts it
+    by an underlying date, so it reads Jan, Feb, Mar... In ThoughtSpot a varchar
+    Month sorts alphabetically (Apr, Aug, Dec...), wrecking the order. The faithful
+    equivalent is the base date column bucketed monthly: the search keyword
+    `[Date].MONTHLY`, which surfaces as a `Month(Date)` column. Returns
+    {month_col_display_name: ("[Date].MONTHLY", "Month(Date)")}."""
+    out = {}
+    for t in model_json.get("tables", []):
+        date_col, month_cols = None, []
+        for c in t.get("columns", []):
+            if c.get("calculated"):
+                continue
+            if (c.get("dataType") or "").lower() in ("datetime", "date") and date_col is None:
+                date_col = c["name"]
+            if c["name"].strip().lower() in _MONTH_PARTS:
+                month_cols.append(c["name"])
+        if date_col:
+            for mc in month_cols:
+                out[mc] = ("[%s].MONTHLY" % date_col, "Month(%s)" % date_col)
+    return out
 
 
 def chart_type_for(visual_type):
@@ -812,9 +848,32 @@ def build_model_tml(model_json, model_name, join_type, overrides, warnings,
             if c.get("calculated") and f"{t['name']}::{c['name']}" not in force_physical:
                 add_formula(c["name"], c.get("expression", ""), "column", t["name"], hcols)
 
-    # Order formulas so a formula appears AFTER the formulas it references: ThoughtSpot
-    # adds them sequentially, so a forward reference (e.g. New Hires = sum([isNewHire])
-    # emitted before isNewHire) fails. Stable topological sort, cycle-safe.
+    # Cascade NEEDS-REVIEW: a formula that references [formula_X] where X did not
+    # translate (flagged, never emitted) would dangle at import. Drop it (and whatever
+    # then dangles) so the model imports clean AND the report stays honest -- without
+    # this the measure would read "Migrated" but get silently pruned on import.
+    row_by_name = {r["name"]: r for r in measure_rows}
+    _idref = re.compile(r"\[formula_([^\]]+)\]")
+    changed = True
+    while changed:
+        changed = False
+        emitted = {f["name"] for f in formulas}
+        for f in list(formulas):
+            dangling = sorted({x for x in _idref.findall(f["expr"])
+                               if x != f["name"] and x not in emitted})
+            if dangling:
+                formulas.remove(f)
+                columns[:] = [c for c in columns if c.get("formula_id") != f["id"]]
+                r = row_by_name.get(f["name"])
+                if r:
+                    r["status"], r["ts_formula"] = "NEEDS REVIEW", ""
+                    r["note"] = ((r["note"] + "; ") if r.get("note") else "") + \
+                        "depends on un-migrated measure(s): " + ", ".join(dangling)
+                changed = True
+
+    # Order formulas so a formula appears AFTER the formulas it references (by id):
+    # ThoughtSpot adds them sequentially, so a forward [formula_X] reference fails.
+    # Stable topological sort, cycle-safe.
     fnames = {f["name"] for f in formulas}
     by_name = {f["name"]: f for f in formulas}
     ordered, state = [], {}      # state: 1=visiting, 2=done
@@ -825,7 +884,7 @@ def build_model_tml(model_json, model_name, join_type, overrides, warnings,
             return                                   # done or in a cycle -> skip
         state[f["name"]] = 1
         for g in fnames:
-            if g != f["name"] and f"[{g}]" in f["expr"]:
+            if g != f["name"] and f"[formula_{g}]" in f["expr"]:
                 _visit(by_name[g])
         state[f["name"]] = 2
         ordered.append(f)
@@ -870,8 +929,13 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
     ov_visuals = {(v.get("page"), v.get("visual")): v
                   for v in (overrides.get("visuals") or [])}
     agg_measures = agg_measures or {}
-    answers, liveboards, visual_rows, page_rows = [], [], [], []
+    answers, liveboards, visual_rows, page_rows, tabs = [], [], [], [], []
     norm = {n.lower(): n for n in column_names}
+    bucket_map = _date_bucket_map(model_json)   # month-name col -> monthly date bucket
+    # the report (all its pages) becomes one liveboard; name it after the report
+    report_name = (model_json.get("project_name")
+                   or re.sub(r"\s*\(PBI\)\s*$|\s+Model\s*$", "", model_name).strip()
+                   or model_name)
 
     for page in model_json.get("pages", []):
         page_name = page.get("name") or page.get("id")
@@ -887,14 +951,22 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
                                     "ts_chart": "(filter)", "status": status, "note": note})
                 continue
 
-            # Resolve fields to model columns by leaf-name match.
-            cols, missing = [], []
+            # Resolve fields to model columns by leaf-name match, keeping each field's
+            # PBIR role (Category/Series/Rows/Columns/Values) so the axis layout is faithful.
+            cols, roles, missing = [], [], []
+            bucket_tokens = {}
+
+            def _place(col, role):
+                if col not in cols:
+                    cols.append(col)
+                    roles.append(role)
+
             for f in vis.get("fields", []):
+                role = f.get("role") or ""
                 if f.get("kind") == "aggregation":   # inline Sum(col) -> the equivalent measure
                     mname = agg_measures.get(((f.get("agg") or "sum"), (f.get("field") or "").lower()))
                     if mname and mname.lower() in norm:
-                        if norm[mname.lower()] not in cols:
-                            cols.append(norm[mname.lower()])
+                        _place(norm[mname.lower()], role)
                     else:
                         missing.append(f"{f.get('agg') or 'agg'}({f.get('field')})")
                     continue
@@ -902,9 +974,13 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
                 if not leaf:
                     continue
                 match = norm.get(leaf.lower())
-                if match and match not in cols:
-                    cols.append(match)
-                elif not match:
+                if match and match in bucket_map:     # date-month part -> monthly date bucket
+                    tok, label = bucket_map[match]
+                    _place(label, role)
+                    bucket_tokens[label] = tok
+                elif match:
+                    _place(match, role)
+                else:
                     missing.append(leaf)
             if missing:
                 note = (note + "; " if note else "") + "unmatched fields: " + ", ".join(sorted(set(missing)))
@@ -927,41 +1003,63 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
                     f"{ct} needs {need} measure(s) but {n_meas} survived translation "
                     "(the rest are time-intelligence / not migrated); flagged, not downgraded")
 
-            a_obj = _answer_tml(title, model_name, model_fqn, cols, ct, measure_names)
+            a_obj = _answer_tml(title, model_name, model_fqn, cols, ct, measure_names,
+                                roles, bucket_tokens)
             answers.append(a_obj)
             page_answers.append(a_obj["answer"])   # full answer payload, embedded in the liveboard viz
             visual_rows.append({"page": page_name, "visual": title, "ts_chart": ct,
                                 "status": status, "note": note})
 
-        lb_name = f"{page_name}"
-        liveboards.append(_liveboard_tml(lb_name, page_answers))
-        page_rows.append({"name": page_name, "liveboard": lb_name,
+        tabs.append((page_name, page_answers))
+        page_rows.append({"name": page_name, "liveboard": report_name,
                           "status": "Migrated" if page_answers else "NEEDS REVIEW"})
+    # One liveboard, one tab per report page (PBI pageOrder preserved by the parser).
+    liveboards = [_liveboard_tml(report_name, tabs)] if any(p for _, p in tabs) else []
     return answers, liveboards, visual_rows, page_rows
 
 
-def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names):
+def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names,
+                roles=None, bucket_tokens=None):
+    roles = roles or [""] * len(cols)
+    bucket_tokens = bucket_tokens or {}
+    role_of = {c: r for c, r in zip(cols, roles)}
     ys = [c for c in cols if c in measure_names]
     xs = [c for c in cols if c not in measure_names]
-    search = " ".join(f"[{c}]" for c in cols)
+    # A monthly-bucketed date column carries its own search token ([Date].MONTHLY);
+    # everything else is just [Name].
+    search = " ".join(bucket_tokens.get(c, f"[{c}]") for c in cols)
+
+    def by_role(*names):
+        return [c for c in xs if role_of.get(c) in names]
+
+    rows_x = by_role("Rows")
+    cols_c = by_role("Columns")
+    cat_x = by_role("Category", "Axis", "X")
+    ser_c = by_role("Series", "Legend", "Group")
+
     chart = {"type": chart_type,
              "chart_columns": [{"column_id": c} for c in cols]}
     ax = {}
     if chart_type == "KPI":
         ax = {"y": ys or cols}
     elif chart_type in ("PIE",) and len(cols) >= 2:
-        ax = {"x": xs[:1] or [cols[0]], "y": ys[:1] or [cols[-1]]}
+        xax = (cat_x or rows_x or xs)[:1] or [cols[0]]
+        ax = {"x": xax, "y": ys[:1] or [cols[-1]]}
     elif chart_type == "PIVOT_TABLE" and ys:
-        # pivot needs an axis layout: rows = first attribute, columns = other
-        # attributes, values = the measures. Without this it renders blank.
-        ax = {"x": xs[:1] or [cols[0]], "y": ys}
-        if xs[1:]:
-            ax["color"] = xs[1:]
+        # Faithful pivot layout from PBIR roles: rows on the left, columns across the
+        # top, measures in the cells. Without axis_configs a pivot renders blank.
+        xax = rows_x or cat_x or xs[:1] or [cols[0]]
+        cax = cols_c or ser_c or [c for c in xs if c not in xax]
+        ax = {"x": xax, "y": ys}
+        if cax:
+            ax["color"] = cax
     elif chart_type in ("COLUMN", "BAR", "LINE", "AREA", "STACKED_COLUMN",
                         "STACKED_BAR", "LINE_COLUMN", "LINE_STACKED_COLUMN") and len(cols) >= 2:
-        ax = {"x": xs[:1] or [cols[0]], "y": ys or [cols[-1]]}
-        if xs[1:]:
-            ax["color"] = xs[1:2]
+        xax = (cat_x or rows_x or xs)[:1] or [cols[0]]
+        cax = (ser_c or cols_c or [c for c in xs if c not in xax])[:1]
+        ax = {"x": xax, "y": ys or [cols[-1]]}
+        if cax:
+            ax["color"] = cax
     if ax:
         chart["axis_configs"] = [ax]
     tables_ref = {"name": model_name}
@@ -982,13 +1080,29 @@ def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names):
     }
 
 
-def _liveboard_tml(name, answer_payloads):
-    # Liveboard TML embeds the FULL answer definition per viz (not a name reference);
-    # ThoughtSpot requires each viz's answer to carry its own tables/columns/chart.
-    viz = [{"id": f"Viz_{i + 1}", "answer": a}
-           for i, a in enumerate(answer_payloads)]
+def _liveboard_tml(name, tabs):
+    """Build ONE liveboard whose tabs are the Power BI report's pages.
+
+    `tabs` = [(tab_name, [answer_payload, ...]), ...]. ThoughtSpot models a multi-page
+    report as a single liveboard with layout.tabs[]: every viz lives in a flat
+    visualizations[] (each embedding its FULL answer def), and each tab's tiles[]
+    reference vizzes by id. Tiles are laid out two-per-row on the 12-col grid.
+    Tabs with no migrated vizzes are dropped (an empty tab won't render)."""
+    viz, tab_layout, n = [], [], 0
+    for tab_name, payloads in tabs:
+        if not payloads:
+            continue
+        tiles = []
+        for j, a in enumerate(payloads):
+            n += 1
+            vid = f"Viz_{n}"
+            viz.append({"id": vid, "answer": a})
+            tiles.append({"visualization_id": vid,
+                          "x": (j % 2) * 6, "y": (j // 2) * 8, "width": 6, "height": 8})
+        tab_layout.append({"name": tab_name, "tiles": tiles})
     return {"obj_id": f"{_slug(name)}-pbi",
-            "liveboard": {"name": name, "visualizations": viz}}
+            "liveboard": {"name": name, "visualizations": viz,
+                          "layout": {"tabs": tab_layout}}}
 
 
 # --------------------------------------------------------------------------- #

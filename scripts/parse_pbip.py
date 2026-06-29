@@ -282,17 +282,32 @@ def parse_report_pbir(report_dir: str, warnings: list):
     pages_dir = os.path.join(definition, "pages")
     if not os.path.isdir(pages_dir):
         return None  # signal: not PBIR
+    # pages.json carries the report's page tab order + the default (active) page;
+    # the report's pages become a single liveboard's tabs, so order matters.
+    page_order, active_page = [], None
+    pjmeta = os.path.join(pages_dir, "pages.json")
+    if os.path.isfile(pjmeta):
+        try:
+            with open(pjmeta, encoding="utf-8") as f:
+                pm = json.load(f)
+            page_order = pm.get("pageOrder") or []
+            active_page = pm.get("activePageName")
+        except Exception as e:
+            warnings.append(f"Could not read {pjmeta}: {e}")
     for page_id in sorted(os.listdir(pages_dir)):
         pdir = os.path.join(pages_dir, page_id)
         if not os.path.isdir(pdir):
             continue
-        page = {"id": page_id, "name": page_id, "visuals": []}
+        page = {"id": page_id, "name": page_id, "visuals": [],
+                "tooltip": False, "active": page_id == active_page}
         pjson = os.path.join(pdir, "page.json")
         if os.path.isfile(pjson):
             try:
                 with open(pjson, encoding="utf-8") as f:
                     pd = json.load(f)
                 page["name"] = pd.get("displayName", page_id)
+                # a PBI "Tooltip" page is a hover overlay, not a real report tab
+                page["tooltip"] = pd.get("type") == "Tooltip"
             except Exception as e:
                 warnings.append(f"Could not read {pjson}: {e}")
         vdir = os.path.join(pdir, "visuals")
@@ -315,6 +330,10 @@ def parse_report_pbir(report_dir: str, warnings: list):
                     page["visuals"].append(
                         {"id": vid, "type": "unparsed", "fields": []})
         pages.append(page)
+    # honor the report's tab order (pageOrder); pages not listed keep folder order, last
+    if page_order:
+        rank = {pid: i for i, pid in enumerate(page_order)}
+        pages.sort(key=lambda p: rank.get(p["id"], len(rank)))
     return pages
 
 
