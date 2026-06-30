@@ -248,6 +248,22 @@ def _field_ref(field):
     return _deep_field_name(field), None, None, None
 
 
+def _visual_title(visual_obj):
+    """Explicit title text set on a PBIR visual, or None. Lives at
+    visualContainerObjects.title[].properties.text.expr.Literal.Value. Most visuals
+    have none (Power BI auto-generates the displayed title from the fields), so the
+    converter falls back to deriving a name from the field roles."""
+    try:
+        for t in visual_obj.get("visualContainerObjects", {}).get("title", []):
+            txt = (t.get("properties", {}).get("text", {}).get("expr", {})
+                   .get("Literal", {}).get("Value"))
+            if txt:
+                return txt.strip().strip("'").strip()
+    except Exception:
+        pass
+    return None
+
+
 def _projection_fields(query_state):
     """Pull field names out of a PBIR visual's query projections."""
     fields = []
@@ -324,7 +340,8 @@ def parse_report_pbir(report_dir: str, warnings: list):
                     fields = _projection_fields(visual_obj.get("query", {})
                                                 .get("queryState", {}))
                     page["visuals"].append(
-                        {"id": vid, "type": vtype, "fields": fields})
+                        {"id": vid, "type": vtype, "fields": fields,
+                         "title": _visual_title(visual_obj)})
                 except Exception as e:
                     warnings.append(f"Could not parse visual {vid}: {e}")
                     page["visuals"].append(

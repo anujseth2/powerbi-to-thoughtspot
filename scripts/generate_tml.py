@@ -978,7 +978,8 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
             # parameter-driven SPLY combo with a date-bucket column). When the override gives
             # `search` + `columns`, emit that answer verbatim instead of matching parsed fields.
             if ov and ov.get("search") and ov.get("columns"):
-                a_obj = _answer_tml_explicit(title, model_name, model_fqn, ov)
+                name = ov.get("name") or vis.get("title") or title
+                a_obj = _answer_tml_explicit(name, title, model_name, model_fqn, ov)
                 answers.append(a_obj)
                 page_answers.append(a_obj["answer"])
                 visual_rows.append({"page": page_name, "visual": title,
@@ -1046,7 +1047,10 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
                     f"{ct} needs {need} measure(s) but {n_meas} survived translation "
                     "(the rest are time-intelligence / not migrated); flagged, not downgraded")
 
-            a_obj = _answer_tml(title, model_name, model_fqn, cols, ct, measure_names,
+            # Meaningful name: explicit PBI title, else auto-generate '<measures> by
+            # <attrs>' the way Power BI does, else fall back to the type+index key.
+            name = vis.get("title") or _auto_name(cols, measure_names) or title
+            a_obj = _answer_tml(name, title, model_name, model_fqn, cols, ct, measure_names,
                                 roles, bucket_tokens)
             answers.append(a_obj)
             page_answers.append(a_obj["answer"])   # full answer payload, embedded in the liveboard viz
@@ -1061,7 +1065,18 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
     return answers, liveboards, visual_rows, page_rows
 
 
-def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names,
+def _auto_name(cols, measure_names):
+    """Derive a meaningful answer name from the columns the way Power BI auto-titles a
+    visual: '<measures> by <attributes>' (e.g. 'New Hires by Month and FPDesc'). Used
+    when the PBI visual carries no explicit title. Returns None if it can't form one."""
+    measures = [c for c in cols if c in measure_names]
+    attrs = [c for c in cols if c not in measure_names]
+    if measures and attrs:
+        return f"{', '.join(measures)} by {' and '.join(attrs)}"
+    return None
+
+
+def _answer_tml(name, obj_key, model_name, model_fqn, cols, chart_type, measure_names,
                 roles=None, bucket_tokens=None):
     roles = roles or [""] * len(cols)
     bucket_tokens = bucket_tokens or {}
@@ -1109,7 +1124,7 @@ def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names,
     if model_fqn:
         tables_ref = {"id": model_name, "name": model_name, "fqn": model_fqn}
     return {
-        "obj_id": f"{_slug(name)}-pbi",
+        "obj_id": f"{_slug(obj_key)}-pbi",
         "answer": {
             "name": name,
             "display_mode": "CHART_MODE",
@@ -1123,7 +1138,7 @@ def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names,
     }
 
 
-def _answer_tml_explicit(name, model_name, model_fqn, ov):
+def _answer_tml_explicit(name, obj_key, model_name, model_fqn, ov):
     """Build an answer verbatim from an override spec: ov['search'] (search_query),
     ov['columns'] (ordered column_ids, may include date-bucket columns like
     MONTH_OF_YEAR(Date)), ov['ts_chart'], and optional ov['axis'] (one axis_config).
@@ -1137,7 +1152,7 @@ def _answer_tml_explicit(name, model_name, model_fqn, ov):
     if model_fqn:
         tables_ref = {"id": model_name, "name": model_name, "fqn": model_fqn}
     return {
-        "obj_id": f"{_slug(name)}-pbi",
+        "obj_id": f"{_slug(obj_key)}-pbi",
         "answer": {
             "name": name,
             "display_mode": "CHART_MODE",
