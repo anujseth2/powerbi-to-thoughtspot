@@ -832,8 +832,10 @@ def build_model_tml(model_json, model_name, join_type, overrides, warnings,
         if name.lower() in seen:        # case-insensitive: ThoughtSpot names must be unique
             return
         seen.add(name.lower())
-        col = {"name": name, "formula_id": fid,
-               "properties": {"column_type": "MEASURE" if kind == "measure" else "ATTRIBUTE"}}
+        # an override may force the column role (e.g. a month-of-year formula used as an
+        # axis must be an ATTRIBUTE, not a summable MEASURE)
+        ctype = (ov.get("column_type") if ov else None) or ("MEASURE" if kind == "measure" else "ATTRIBUTE")
+        col = {"name": name, "formula_id": fid, "properties": {"column_type": ctype}}
         columns.append(col)
 
     for t in tables:
@@ -847,6 +849,15 @@ def build_model_tml(model_json, model_name, join_type, overrides, warnings,
         for c in t.get("columns", []):
             if c.get("calculated") and f"{t['name']}::{c['name']}" not in force_physical:
                 add_formula(c["name"], c.get("expression", ""), "column", t["name"], hcols)
+
+    # Override-only measures: hand-authored formulas (overrides.measures) with no Power BI
+    # counterpart -- e.g. parameter-driven SPLY/current-year measures. ts_formula is already
+    # fully qualified, so no home table/cols. Added after PBI measures so they can reference
+    # them by [formula_<name>].
+    existing = {f["name"] for f in formulas}
+    for name, ov in ov_measures.items():
+        if name not in existing and ov.get("ts_formula"):
+            add_formula(name, "", "measure")
 
     # Cascade NEEDS-REVIEW: a formula that references [formula_X] where X did not
     # translate (flagged, never emitted) would dangle at import. Drop it (and whatever
@@ -903,6 +914,12 @@ def build_model_tml(model_json, model_name, join_type, overrides, warnings,
     }
     if formulas:
         model["model"]["formulas"] = formulas
+    # Parameters (overrides.parameters): typed model-level values a formula can read by
+    # name, e.g. a Reference Date that drives parameter-based SPLY/YoY. DATE default_value
+    # must be MM/DD/YYYY. They enable time-comparison that has no DAX-to-formula path.
+    params = overrides.get("parameters")
+    if params:
+        model["model"]["parameters"] = params
     return model, measure_rows, rel_rows
 
 
@@ -957,6 +974,18 @@ def build_answers_and_liveboards(model_json, model_name, model_fqn, column_names
         for vi, vis in enumerate(page.get("visuals", [])):
             title = f"{page_name} - {vis.get('type', 'visual')} {vi + 1}"
             ov = ov_visuals.get((page_name, title)) or ov_visuals.get((page_name, vis.get("id")))
+            # Explicit answer override: the auto-builder can't express some visuals (e.g. a
+            # parameter-driven SPLY combo with a date-bucket column). When the override gives
+            # `search` + `columns`, emit that answer verbatim instead of matching parsed fields.
+            if ov and ov.get("search") and ov.get("columns"):
+                a_obj = _answer_tml_explicit(title, model_name, model_fqn, ov)
+                answers.append(a_obj)
+                page_answers.append(a_obj["answer"])
+                visual_rows.append({"page": page_name, "visual": title,
+                                    "ts_chart": ov.get("ts_chart", "?"),
+                                    "status": ov.get("status", "Migrated"),
+                                    "note": ov.get("note", "explicit answer override")})
+                continue
             ct, status, note = chart_type_for(vis.get("type"))
             if ov and ov.get("ts_chart"):
                 ct, status, note = ov["ts_chart"], ov.get("status", "Migrated"), ov.get("note", "from overrides")
@@ -1089,6 +1118,34 @@ def _answer_tml(name, model_name, model_fqn, cols, chart_type, measure_names,
             "answer_columns": [{"name": c} for c in cols],
             "table": {"table_columns": [{"column_id": c} for c in cols],
                       "ordered_column_ids": list(cols)},
+            "chart": chart,
+        },
+    }
+
+
+def _answer_tml_explicit(name, model_name, model_fqn, ov):
+    """Build an answer verbatim from an override spec: ov['search'] (search_query),
+    ov['columns'] (ordered column_ids, may include date-bucket columns like
+    MONTH_OF_YEAR(Date)), ov['ts_chart'], and optional ov['axis'] (one axis_config).
+    For visuals the field-matching auto-builder can't express."""
+    cols = list(ov["columns"])
+    chart = {"type": ov.get("ts_chart", "GRID_TABLE"),
+             "chart_columns": [{"column_id": c} for c in cols]}
+    if ov.get("axis"):
+        chart["axis_configs"] = [ov["axis"]]
+    tables_ref = {"name": model_name}
+    if model_fqn:
+        tables_ref = {"id": model_name, "name": model_name, "fqn": model_fqn}
+    return {
+        "obj_id": f"{_slug(name)}-pbi",
+        "answer": {
+            "name": name,
+            "display_mode": "CHART_MODE",
+            "tables": [tables_ref],
+            "search_query": ov["search"],
+            "answer_columns": [{"name": c} for c in cols],
+            "table": {"table_columns": [{"column_id": c} for c in cols],
+                      "ordered_column_ids": cols},
             "chart": chart,
         },
     }
