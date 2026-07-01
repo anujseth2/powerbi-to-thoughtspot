@@ -131,21 +131,25 @@ def main():
         extra = f" {bidir} had a Power BI bidirectional cross-filter (verify)." if bidir else ""
         L.append(f"\n**Relationships:** {rt['Migrated']} migrated as joins (LEFT_OUTER, MANY_TO_ONE).{extra}")
 
-    # ---- Measures (no note column; DAX -> formula is the value) ----
+    # ---- Measures (block layout: one per measure, Power BI + ThoughtSpot on their own
+    # lines, so long DAX/formulas breathe instead of cramming a table cell) ----
+    def emit_measure(m, with_dax=True):
+        L.append(f"**{m.get('name','')}**  ({m.get('status','')})")
+        if with_dax:
+            L.append(f"- Power BI: `{m.get('original_dax','')}`")
+        tsf = (m.get("ts_formula", "") or "").strip()
+        L.append("- ThoughtSpot: " + (f"`{tsf}`" if tsf else "_(flagged, rebuild by hand)_"))
+        L.append("")
+
     if src_meas:
         L.append("\n## Measures & calculated columns (from Power BI)\n")
-        L.append("| Measure | Status | Power BI DAX | ThoughtSpot formula |")
-        L.append("|:--|:--|:--|:--|")
         for m in src_meas:
-            L.append(f"| {m.get('name','')} | {m.get('status','')} | "
-                     f"`{esc(m.get('original_dax',''))}` | {('`'+esc(m.get('ts_formula',''))+'`') if (m.get('ts_formula') or '').strip() else '(flagged, none)'} |")
+            emit_measure(m)
     if added_meas:
-        L.append("\n## Measures added by the converter\n")
+        L.append("## Measures added by the converter\n")
         L.append("Rebuilt because Power BI computes these natively but ThoughtSpot has no direct formula.\n")
-        L.append("| Measure | ThoughtSpot formula |")
-        L.append("|:--|:--|")
         for m in added_meas:
-            L.append(f"| {m.get('name','')} | `{esc(m.get('ts_formula',''))}` |")
+            emit_measure(m, with_dax=False)
 
     # ---- Visuals (list the migrated; collapse skipped decorations to a count) ----
     L.append("\n## Visuals\n")
