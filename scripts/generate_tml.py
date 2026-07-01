@@ -1238,6 +1238,13 @@ def _answer_tml_explicit(name, obj_key, model_name, model_fqn, ov):
         chart["axis_configs"] = [ov["axis"]]
     if ov.get("client_state_v2"):
         chart["client_state_v2"] = ov["client_state_v2"]
+    # custom_chart_config is the AUTHORITATIVE render config for the newer chart engine
+    # (line-vs-column split + per-axis MERGED column groups). Unlike client_state_v2 --
+    # which TS re-derives on render for combos -- this one persists, so a combo's dual-axis
+    # layout must be replayed HERE. viz_style/custom_visual_props round-trip alongside it.
+    for k in ("custom_chart_config", "custom_visual_props", "viz_style"):
+        if ov.get(k) is not None:
+            chart[k] = ov[k]
     tables_ref = {"name": model_name}
     if model_fqn:
         tables_ref = {"id": model_name, "name": model_name, "fqn": model_fqn}
