@@ -347,6 +347,46 @@ def _refs_to_ids(dax, names):
     return out
 
 
+def _calc_all_to_group_agg(s):
+    """Rewrite CALCULATE(m, ALL(col), ALL(col), ...) -> group_aggregate(m,
+    query_groups() - {cols}, query_filters() - {cols}) -- ThoughtSpot's equivalent of
+    DAX removing specific dimensions from filter context (verified on-cluster; it's how
+    a "normalized" measure like TO % Norm = CALCULATE([TO %], ALL(Gender), ALL(Ethnicity))
+    ports). Only fires when EVERY filter arg is ALL/REMOVEFILTERS/ALLSELECTED of a single
+    column; otherwise returns s unchanged so other CALCULATE shapes are handled/flagged.
+    The raw column refs (Table[Col]) are left for the later _COL_REF pass to qualify."""
+    out, guard = s, 0
+    while guard < 50:
+        guard += 1
+        m = re.search(r"\bCALCULATE\s*\(", out, re.I)
+        if not m:
+            return out
+        close = _match_paren(out, m.end() - 1)
+        if close < 0:
+            return out
+        args = _split_args(out[m.end():close])
+        if len(args) < 2:
+            return out
+        cols, ok = [], True
+        for a in args[1:]:
+            am = re.match(r"(?i)\s*(ALL|REMOVEFILTERS|ALLSELECTED)\s*\(", a)
+            fc = _match_paren(a, am.end() - 1) if am else -1
+            inner = a[am.end():fc].strip() if fc > 0 else ""
+            # only a single COLUMN ref (Table[Col]); ALL(<whole table>) has no "[" and is
+            # a different semantic (remove all that table's cols) -> defer/flag, don't rewrite
+            if not am or not inner or "," in inner or "[" not in inner:
+                ok = False
+                break
+            cols.append(inner)
+        if not ok:
+            return out
+        cset = ", ".join(cols)
+        repl = ("group_aggregate(%s, query_groups() - {%s}, query_filters() - {%s})"
+                % (args[0].strip(), cset, cset))
+        out = out[:m.start()] + repl + out[close + 1:]
+    return out
+
+
 def _approx_calculate(s):
     """Rewrite every approximable CALCULATE in `s` to a conditional sum_if. Returns
     the rewritten string, or None if any CALCULATE is present but not approximable
@@ -388,6 +428,14 @@ def translate_dax(dax, home_table=None, home_cols=None, date_cols=None, measure_
         src = _refs_to_ids(src, set(measure_dax))
 
     note_bits = []
+    # CALCULATE(m, ALL(col), ...) -> group_aggregate(m, query_groups() - {cols},
+    # query_filters() - {cols}): TS's equivalent of removing specific dimensions from
+    # context. Run BEFORE the review check so ALL() isn't flagged. Cluster-verified.
+    ga = _calc_all_to_group_agg(src)
+    if ga != src:
+        src = ga
+        note_bits.append("CALCULATE(ALL(dims)) -> group_aggregate removing those dims; verify vs Power BI")
+
     # Approximate the common CALCULATE(<agg>, FILTER(table, cond)) pattern as a
     # conditional sum_if BEFORE the review check (otherwise all CALCULATE is flagged).
     approx = _approx_calculate(src)
@@ -442,7 +490,8 @@ def translate_dax(dax, home_table=None, home_cols=None, date_cols=None, measure_
     _LOGICAL_KW = {"if", "then", "else", "and", "or", "not", "in"}
     # functions we synthesize (sum_if from CALCULATE, diff_days from date subtraction)
     # plus the TS targets of _DAX_FUNC -> never flag these as unmapped.
-    _PASS_FUNCS = ({"concat", "safe_divide", "sum_if", "count_if", "diff_days"}
+    _PASS_FUNCS = ({"concat", "safe_divide", "sum_if", "count_if", "diff_days",
+                    "group_aggregate", "query_groups", "query_filters"}
                    | set(_DAX_FUNC.values()))
 
     def _rename(m):
