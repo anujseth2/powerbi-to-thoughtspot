@@ -49,3 +49,23 @@ Apply the aggregation the measure/field uses (e.g. a `Values` field set to "Sum 
 
 ## Page → Liveboard
 Each report page becomes one Liveboard. Add every answer from that page to the liveboard, preserving a sensible left-to-right, top-to-bottom order. Power BI's exact pixel layout does not transfer — match content, not coordinates, and note that visual positioning is approximate.
+
+## Combo charts (line + clustered column) — the durable axis config
+A Power BI `lineClusteredColumnComboChart` maps to ThoughtSpot `ADVANCED_LINE_COLUMN`. The line-vs-column split and the dual/merged-axis layout do **NOT** persist through `chart.client_state_v2` — ThoughtSpot **re-derives** that on every render, so it decays to a single X axis and the non-primary measures get piled onto one shared secondary axis. The **durable** config is `chart.custom_chart_config`:
+
+```
+custom_chart_config:
+- key: basic
+  dimensions:
+  - {key: x-axis,        axes: [{type: FLAT,   column: <date/attr>}]}
+  - {key: y-axis-column, axes: [{type: MERGED, columns: [<col measures, e.g. current + prior>]}]}
+  - {key: y-axis-line,   axes: [{type: MERGED, columns: [<the line measure>]}]}
+  - {key: trellis-by}
+  mode: AXIS_DRIVEN
+```
+
+`y-axis-column` = the clustered COLUMNS; `y-axis-line` = the LINE(s) on their own axis. To reproduce a hand-tuned combo, capture and replay `custom_chart_config` (not `client_state_v2`). Per-column `format` (e.g. PERCENTAGE) lives on `answer_columns[].format`.
+
+## Gotchas
+- **Tab GUIDs regenerate on every TML import** (tabs are keyed by name, no stable id), so a bookmarked `.../tab/<guid>` URL breaks after each re-push. Don't rely on tab GUIDs across pushes.
+- A `basicShape` is a decoration (rectangle/line/label), not a data visual — skip it (don't flag for review).
