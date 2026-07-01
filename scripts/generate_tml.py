@@ -249,6 +249,7 @@ _DAX_FUNC = {
     "sum": "sum", "average": "average", "min": "min", "max": "max",
     "count": "count", "counta": "count", "distinctcount": "unique_count",
     "abs": "abs", "round": "round", "int": "floor", "trunc": "floor",
+    "ceiling": "ceil", "floor": "floor",
     "sqrt": "sqrt", "exp": "exp", "power": "pow", "mod": "mod", "sign": "sign",
     "year": "year", "month": "month", "day": "day", "hour": "hour",
     "minute": "minute", "second": "second", "quarter": "quarter_number",
