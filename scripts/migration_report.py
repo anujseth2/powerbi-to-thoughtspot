@@ -65,108 +65,119 @@ def main():
     visuals = mapping.get("visuals", [])
     pages = mapping.get("pages", [])
 
-    L = []
-    L.append(f"# Power BI -> ThoughtSpot migration report")
-    L.append(f"**Source:** {name}  **Generated:** {today}\n")
+    # Split measures into those FROM Power BI (carry an original_dax) and those the
+    # converter ADDED via overrides (no source DAX, e.g. parameter-driven SPLY/YoY).
+    src_meas = [m for m in measures if (m.get("original_dax") or "").strip()]
+    added_meas = [m for m in measures if not (m.get("original_dax") or "").strip()]
 
-    # Summary table.
-    L.append("## Summary")
-    L.append("| Object type | In Power BI | Migrated | Approximated | Needs review | Skipped |")
-    L.append("|---|---|---|---|---|---|")
+    def esc(s):
+        return (s or "").replace("|", "\\|")
+
+    L = []
+    L.append("# Power BI -> ThoughtSpot migration report")
+    L.append(f"**Source:** {name}  ·  **Generated:** {today}")
+
+    # ---- Summary ----
+    L.append("\n## Summary\n")
+    L.append("| Object | In Power BI | Migrated | Approximated | Needs review | Skipped |")
+    L.append("|:--|--:|--:|--:|--:|--:|")
 
     def row(label, source_count, items):
         t = tally(items)
         return (f"| {label} | {source_count} | {t['Migrated']} | "
                 f"{t['Approximated']} | {t['NEEDS REVIEW']} | {t['Skipped']} |")
 
-    # Split measures into those FROM Power BI (carry an original_dax) and those the
-    # converter ADDED via overrides (no source DAX -- e.g. parameter-driven SPLY/YoY).
-    # Tallying both under "In Power BI" makes Migrated exceed the source count.
-    src_meas = [m for m in measures if (m.get("original_dax") or "").strip()]
-    added_meas = [m for m in measures if not (m.get("original_dax") or "").strip()]
-
     L.append(row("Tables", counts.get("tables", "?"), tables))
     L.append(row("Relationships", counts.get("relationships", "?"), rels))
     L.append(row("Measures & calc cols", len(src_meas), src_meas))
     L.append(row("Visuals", counts.get("visuals", "?"), visuals))
     L.append(row("Pages", counts.get("pages", "?"), pages))
-    L.append(f"\n(Columns in source: {counts.get('columns', '?')})\n")
     if added_meas:
         at = tally(added_meas)
-        L.append(f"_Plus {len(added_meas)} measure(s) the converter ADDED to rebuild "
+        L.append(f"\n> **+{len(added_meas)} measures the converter added** to rebuild "
                  f"time-intelligence Power BI computes natively (parameter-driven SPLY/YoY, "
-                 f"month-of-year axis) — {at['Migrated']} migrated._\n")
+                 f"month-of-year axis). All {at['Migrated']} migrated.")
+    L.append(f"\n_Source has {counts.get('columns', '?')} columns._")
 
-    # Data model.
-    L.append("## Data model")
-    if tables:
-        L.append("### Tables")
-        L.append("| Table | Status | Note |")
-        L.append("|---|---|---|")
-        for t in tables:
-            L.append(f"| {t.get('name','')} | {t.get('status','')} | {t.get('note','')} |")
-    if rels:
-        L.append("\n### Relationships -> joins")
-        L.append("| Relationship | Status | Note |")
-        L.append("|---|---|---|")
-        for r in rels:
-            L.append(f"| {r.get('name','')} | {r.get('status','')} | {r.get('note','')} |")
-    if measures:
-        L.append("\n### Measures -> formulas")
-        L.append("| Measure | Original DAX | ThoughtSpot formula | Status | Note |")
-        L.append("|---|---|---|---|---|")
-        for m in measures:
-            dax = (m.get("original_dax", "") or "").replace("|", "\\|")
-            tsf = (m.get("ts_formula", "") or "").replace("|", "\\|")
-            L.append(f"| {m.get('name','')} | `{dax}` | `{tsf}` | "
-                     f"{m.get('status','')} | {m.get('note','')} |")
-
-    # Report / visuals.
-    L.append("\n## Report / visuals")
-    if visuals:
-        L.append("| Page | Visual | ThoughtSpot chart | Status | Note |")
-        L.append("|---|---|---|---|---|")
-        for v in visuals:
-            L.append(f"| {v.get('page','')} | {v.get('visual','')} | "
-                     f"{v.get('ts_chart','')} | {v.get('status','')} | {v.get('note','')} |")
-    if pages:
-        L.append("\n### Pages -> liveboards")
-        L.append("| Page | Liveboard | Status |")
-        L.append("|---|---|---|")
-        for p in pages:
-            L.append(f"| {p.get('name','')} | {p.get('liveboard','')} | {p.get('status','')} |")
-
-    # Verification checklist.
-    L.append("\n## Verification checklist (do these in ThoughtSpot)")
-    L.append("1. Pick one known total in Power BI (e.g. a card showing Total Sales) "
-             "and confirm the SAME number appears in ThoughtSpot. This single check "
-             "validates tables + joins + formula end to end.")
-    L.append("2. Spot-check 2-3 more measures against their Power BI values.")
-    L.append("3. Confirm each page's visuals are all present on the liveboard.")
-    L.append("4. Confirm slicers / filters carried over.")
-
-    # Needs-attention list, highest impact first.
-    flagged = []
-    for bucket, items, key in [
-        ("Measure", measures, "name"),
-        ("Relationship", rels, "name"),
-        ("Table", tables, "name"),
-        ("Visual", visuals, "visual"),
-    ]:
-        for it in items:
-            if it.get("status") in ("NEEDS REVIEW", "Approximated", "Skipped"):
-                flagged.append(f"- **{bucket}: {it.get(key,'')}** "
-                               f"({it.get('status')}) - {it.get('note','')}")
-    L.append("\n## Items needing manual attention")
-    if flagged:
-        L.extend(flagged)
+    # ---- Needs attention (ONLY real review items; skipped decorations are noise) ----
+    L.append("\n## Needs your attention\n")
+    attn = []
+    for it in src_meas + added_meas:
+        if it.get("status") in ("NEEDS REVIEW", "Approximated"):
+            attn.append(f"- **{it.get('name','')}** ({it.get('status')}): {it.get('note','') or 'verify vs Power BI'}")
+    for v in visuals:
+        if v.get("status") == "NEEDS REVIEW":
+            attn.append(f"- **{v.get('visual','')}** ({v.get('status')}): {v.get('note','')}")
+    for p in pages:
+        if p.get("status") == "NEEDS REVIEW":
+            attn.append(f"- **Page: {p.get('name','')}**: not migrated as a tab ({p.get('note','') or 'see visuals'})")
+    if attn:
+        L.append("Everything else migrated automatically. Only these need a look:\n")
+        L.extend(attn)
     else:
-        L.append("- None flagged. Still run the verification checklist above.")
+        L.append("Nothing flagged. Still run the verification checklist below.")
 
-    # Parser warnings.
+    # ---- Data model (summarised, not row-per-GUID) ----
+    L.append("\n## Data model\n")
+    mig_tables = [t.get("name", "") for t in tables if t.get("status") == "Migrated"]
+    skip_tables = [t for t in tables if t.get("status") == "Skipped"]
+    if mig_tables:
+        L.append(f"**Tables migrated ({len(mig_tables)}):** " + ", ".join(mig_tables) + ".")
+    if skip_tables:
+        L.append(f"\n**Skipped ({len(skip_tables)}):** Power BI auto date tables (internal), not migrated.")
+    if rels:
+        rt = tally(rels)
+        bidir = sum(1 for r in rels if "bidirectional" in (r.get("note", "") or ""))
+        extra = f" {bidir} had a Power BI bidirectional cross-filter (verify)." if bidir else ""
+        L.append(f"\n**Relationships:** {rt['Migrated']} migrated as joins (LEFT_OUTER, MANY_TO_ONE).{extra}")
+
+    # ---- Measures (no note column; DAX -> formula is the value) ----
+    if src_meas:
+        L.append("\n## Measures & calculated columns (from Power BI)\n")
+        L.append("| Measure | Status | Power BI DAX | ThoughtSpot formula |")
+        L.append("|:--|:--|:--|:--|")
+        for m in src_meas:
+            L.append(f"| {m.get('name','')} | {m.get('status','')} | "
+                     f"`{esc(m.get('original_dax',''))}` | {('`'+esc(m.get('ts_formula',''))+'`') if (m.get('ts_formula') or '').strip() else '(flagged, none)'} |")
+    if added_meas:
+        L.append("\n## Measures added by the converter\n")
+        L.append("Rebuilt because Power BI computes these natively but ThoughtSpot has no direct formula.\n")
+        L.append("| Measure | ThoughtSpot formula |")
+        L.append("|:--|:--|")
+        for m in added_meas:
+            L.append(f"| {m.get('name','')} | `{esc(m.get('ts_formula',''))}` |")
+
+    # ---- Visuals (list the migrated; collapse skipped decorations to a count) ----
+    L.append("\n## Visuals\n")
+    mig_v = [v for v in visuals if v.get("status") == "Migrated"]
+    skip_v = [v for v in visuals if v.get("status") == "Skipped"]
+    rev_v = [v for v in visuals if v.get("status") == "NEEDS REVIEW"]
+    if mig_v:
+        L.append("| Page | Visual | ThoughtSpot chart |")
+        L.append("|:--|:--|:--|")
+        for v in mig_v:
+            L.append(f"| {v.get('page','')} | {v.get('visual','')} | {v.get('ts_chart','')} |")
+    notes = []
+    if skip_v:
+        notes.append(f"{len(skip_v)} non-data objects skipped (shapes, buttons, text boxes)")
+    if rev_v:
+        notes.append(f"{len(rev_v)} flagged (see Needs your attention)")
+    if notes:
+        L.append("\n_" + "; ".join(notes) + "._")
+    mig_pages = [p.get("name", "") for p in pages if p.get("status") == "Migrated"]
+    if mig_pages:
+        L.append(f"\n**Pages -> liveboard tabs:** " + ", ".join(mig_pages) + " (one liveboard).")
+
+    # ---- Verification ----
+    L.append("\n## Verify in ThoughtSpot")
+    L.append("1. Match one known Power BI total against ThoughtSpot (validates tables + joins + formulas end to end).")
+    L.append("2. Spot-check 2-3 more measures.")
+    L.append("3. Confirm each tab's visuals are present.")
+    L.append("4. Confirm filters carried over.")
+
     warnings = model.get("warnings", [])
     if warnings:
-        L.append("\n## Parser warnings (extraction-level)")
+        L.append("\n## Parser warnings")
         for w in warnings:
             L.append(f"- {w}")
 
