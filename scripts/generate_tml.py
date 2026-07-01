@@ -915,6 +915,13 @@ def build_model_tml(model_json, model_name, join_type, overrides, warnings,
     }
     if formulas:
         model["model"]["formulas"] = formulas
+    # Enable Spotter (natural-language search) on the model. A TML-imported model
+    # defaults to properties.spotter_config.is_spotter_enabled=false, so Spotter's
+    # ai/answer APIs return "No answer found" until this is set true. A migrated model
+    # should be NL-searchable, so default on; override with spotter_enabled:false.
+    props = {"spotter_config": {"is_spotter_enabled": overrides.get("spotter_enabled", True)}}
+    props.update(overrides.get("model_properties") or {})
+    model["model"]["properties"] = props
     # Parameters (overrides.parameters): typed model-level values a formula can read by
     # name, e.g. a Reference Date that drives parameter-based SPLY/YoY. DATE default_value
     # must be MM/DD/YYYY. They enable time-comparison that has no DAX-to-formula path.
