@@ -79,12 +79,23 @@ def main():
         return (f"| {label} | {source_count} | {t['Migrated']} | "
                 f"{t['Approximated']} | {t['NEEDS REVIEW']} | {t['Skipped']} |")
 
+    # Split measures into those FROM Power BI (carry an original_dax) and those the
+    # converter ADDED via overrides (no source DAX -- e.g. parameter-driven SPLY/YoY).
+    # Tallying both under "In Power BI" makes Migrated exceed the source count.
+    src_meas = [m for m in measures if (m.get("original_dax") or "").strip()]
+    added_meas = [m for m in measures if not (m.get("original_dax") or "").strip()]
+
     L.append(row("Tables", counts.get("tables", "?"), tables))
     L.append(row("Relationships", counts.get("relationships", "?"), rels))
-    L.append(row("Measures", counts.get("measures", "?"), measures))
+    L.append(row("Measures & calc cols", len(src_meas), src_meas))
     L.append(row("Visuals", counts.get("visuals", "?"), visuals))
     L.append(row("Pages", counts.get("pages", "?"), pages))
     L.append(f"\n(Columns in source: {counts.get('columns', '?')})\n")
+    if added_meas:
+        at = tally(added_meas)
+        L.append(f"_Plus {len(added_meas)} measure(s) the converter ADDED to rebuild "
+                 f"time-intelligence Power BI computes natively (parameter-driven SPLY/YoY, "
+                 f"month-of-year axis) — {at['Migrated']} migrated._\n")
 
     # Data model.
     L.append("## Data model")
