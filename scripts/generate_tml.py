@@ -459,9 +459,10 @@ def translate_dax(dax, home_table=None, home_cols=None, date_cols=None, measure_
     expr = _COL_REF.sub(
         lambda m: f"[{(m.group(1) or m.group(2)).strip()}::{m.group(3).strip()}]", src)
 
-    # Expand argument-aware calls: OR/AND conditions before IF; DIVIDE/ROUND anywhere.
+    # Expand argument-aware calls: OR/AND conditions before IF; DIVIDE/ROUND/CEILING/FLOOR anywhere.
     for fname, repl in (("DIVIDE", _divide_repl), ("OR", _or_repl),
-                        ("AND", _and_repl), ("IF", _if_repl), ("ROUND", _round_repl)):
+                        ("AND", _and_repl), ("IF", _if_repl), ("ROUND", _round_repl),
+                        ("CEILING", _ceiling_repl), ("FLOOR", _floor_repl)):
         expr = _expand_calls(expr, fname, repl)
         if expr is None:
             return None, "NEEDS REVIEW", f"could not expand {fname}()"
@@ -575,7 +576,8 @@ _IF = "\x00IF\x00"
 _OR = "\x00OR\x00"
 _AND = "\x00AND\x00"
 _RND = "\x00ROUND\x00"
-_SENTINELS = ((_IF, "if"), (_OR, "or"), (_AND, "and"), (_RND, "round"))
+_FLR = "\x00FLOOR\x00"   # FLOOR->floor collides with the case-insensitive expander re-match
+_SENTINELS = ((_IF, "if"), (_OR, "or"), (_AND, "and"), (_RND, "round"), (_FLR, "floor"))
 
 
 def _divide_repl(args):
@@ -613,6 +615,28 @@ def _round_repl(args):
         inc_s = str(int(inc)) if inc >= 1 else ("%.10f" % inc).rstrip("0")
         return f"{_RND}({args[0]}, {inc_s})"
     return None      # non-literal precision -> can't convert reliably; NEEDS REVIEW
+
+
+def _ceiling_repl(args):
+    # DAX CEILING(x[, sig]): round UP. TS ceil(y) rounds up to the nearest integer, so
+    # CEILING(x) -> ceil(x); CEILING(x, sig) -> ceil(x/sig)*sig (sig=1 collapses to ceil(x)).
+    if len(args) == 1:
+        return f"ceil({args[0]})"
+    if len(args) == 2:
+        x, sig = args[0].strip(), args[1].strip()
+        return f"ceil({x})" if sig in ("1", "1.0") else f"(ceil(({x})/({sig}))*({sig}))"
+    return None
+
+
+def _floor_repl(args):
+    # DAX FLOOR(x[, sig]): round DOWN, mirror of CEILING. Emit via the _FLR sentinel so
+    # the generated floor() isn't re-matched by this same case-insensitive expander.
+    if len(args) == 1:
+        return f"{_FLR}({args[0]})"
+    if len(args) == 2:
+        x, sig = args[0].strip(), args[1].strip()
+        return f"{_FLR}({x})" if sig in ("1", "1.0") else f"({_FLR}(({x})/({sig}))*({sig}))"
+    return None
 
 
 # --------------------------------------------------------------------------- #
