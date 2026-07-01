@@ -658,7 +658,8 @@ _CHART_MAP = {
     "map": "GEO_BUBBLE", "filledmapvisual": "GEO_AREA", "shapemap": "GEO_AREA",
     "treemap": "TREEMAP", "funnel": "FUNNEL", "waterfallchart": "WATERFALL",
 }
-_NON_VISUAL = {"slicer", "advancedslicervisual", "textbox", "actionbutton", "image", "shape"}
+_NON_VISUAL = {"slicer", "advancedslicervisual", "textbox", "actionbutton", "image",
+               "shape", "basicshape", "actionbuttonvisual"}
 # Minimum measures a chart type needs to render; used to FLAG (not downgrade) a viz
 # whose measures didn't all translate. Types not listed need 1 (tables need 0).
 _CHART_NEEDS = {"LINE_COLUMN": 2, "LINE_STACKED_COLUMN": 2, "SCATTER": 2, "ADVANCED_BUBBLE": 2}
