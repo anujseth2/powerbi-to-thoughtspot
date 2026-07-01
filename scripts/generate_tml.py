@@ -1143,12 +1143,20 @@ def _answer_tml_explicit(name, obj_key, model_name, model_fqn, ov):
     """Build an answer verbatim from an override spec: ov['search'] (search_query),
     ov['columns'] (ordered column_ids, may include date-bucket columns like
     MONTH_OF_YEAR(Date)), ov['ts_chart'], and optional ov['axis'] (one axis_config).
-    For visuals the field-matching auto-builder can't express."""
+    For visuals the field-matching auto-builder can't express.
+
+    Capture-and-replay of manual UI polish: ov['formats'] maps a column name to a TML
+    `format` block, and ov['client_state_v2'] is the chart's serialized chart-specific
+    config (line/column split, KPI display, etc). Both round-trip through TML import
+    (cluster-verified), so a user tunes the viz once and the converter reproduces it."""
     cols = list(ov["columns"])
+    fmts = ov.get("formats") or {}
     chart = {"type": ov.get("ts_chart", "GRID_TABLE"),
              "chart_columns": [{"column_id": c} for c in cols]}
     if ov.get("axis"):
         chart["axis_configs"] = [ov["axis"]]
+    if ov.get("client_state_v2"):
+        chart["client_state_v2"] = ov["client_state_v2"]
     tables_ref = {"name": model_name}
     if model_fqn:
         tables_ref = {"id": model_name, "name": model_name, "fqn": model_fqn}
@@ -1159,7 +1167,8 @@ def _answer_tml_explicit(name, obj_key, model_name, model_fqn, ov):
             "display_mode": "CHART_MODE",
             "tables": [tables_ref],
             "search_query": ov["search"],
-            "answer_columns": [{"name": c} for c in cols],
+            "answer_columns": [dict({"name": c}, **({"format": fmts[c]} if c in fmts else {}))
+                               for c in cols],
             "table": {"table_columns": [{"column_id": c} for c in cols],
                       "ordered_column_ids": cols},
             "chart": chart,
